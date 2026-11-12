@@ -26,7 +26,9 @@ check_version() {
 check_version docker-ce "${DIB_OIC_DOCKER_VERSION:?}"
 check_version docker-ce-cli "${DIB_OIC_DOCKER_VERSION}"
 check_version containerd.io "${DIB_OIC_CONTAINERD_VERSION:?}"
-if dpkg-query -W docker-ce-rootless-extras >/dev/null 2>&1; then
+# dpkg-query -W also succeeds for a package dpkg only knows about (state
+# not-installed, e.g. a recommends that was skipped): check the status.
+if dpkg-query -W -f='${Status}' docker-ce-rootless-extras 2>/dev/null | grep -q 'ok installed'; then
     check_version docker-ce-rootless-extras "${DIB_OIC_DOCKER_VERSION}"
 fi
 # 21-docker fetched the repository key over HTTPS without checking it.

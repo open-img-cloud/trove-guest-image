@@ -1,0 +1,79 @@
+name: Point latest/ to a published version
+
+# Manual repair: copies an already-published version directory to the
+# latest/ alias on Infomaniak Object Storage and purges the CDN cache,
+# without rebuilding anything (rebuilding would overwrite immutable,
+# already-cached artefacts).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Published version to expose as latest/ (e.g. 2026.2)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-latest
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      BUCKET: trove-guest-image
+      VERSION: ${{ inputs.version }}
+      S3_ENDPOINT: https://s3.gva2.infomaniak.cloud
+      AWS_ACCESS_KEY_ID: ${{ secrets.OIC_S3_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.OIC_S3_SECRET }}
+    steps:
+      - name: Configure aws-cli for Ceph S3
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]+$ ]] || { echo "::error::invalid version '$VERSION'"; exit 1; }
+          cfg="$RUNNER_TEMP/aws-config"
+          printf '[default]\nregion = gva2\nrequest_checksum_calculation = when_required\nresponse_checksum_validation = when_required\ns3 =\n    addressing_style = path\n' > "$cfg"
+          echo "AWS_CONFIG_FILE=$cfg" >> "$GITHUB_ENV"
+
+      - name: Check the version is published
+        run: |
+          set -euo pipefail
+          aws s3 ls --endpoint-url "$S3_ENDPOINT" "s3://$BUCKET/$VERSION/MANIFEST.json" \
+            || { echo "::error::$VERSION is not published in $BUCKET"; exit 1; }
+
+      - name: Copy version to latest/
+        run: |
+          set -euo pipefail
+          # `aws s3 sync` alone is not enough here: it skips files of the
+          # same size whose destination copy is newer, which is exactly the
+          # case when rolling latest/ to an older build (MANIFEST.json,
+          # SHA256SUMS, index.html keep their size across versions).
+          # Copy everything unconditionally, then only delete leftovers.
+          aws s3 cp --recursive --no-progress \
+            --cache-control "public, max-age=300" --metadata-directive REPLACE \
+            --endpoint-url "$S3_ENDPOINT" \
+            "s3://$BUCKET/$VERSION/" "s3://$BUCKET/latest/"
+          aws s3 sync --delete --no-progress --size-only \
+            --endpoint-url "$S3_ENDPOINT" \
+            "s3://$BUCKET/$VERSION/" "s3://$BUCKET/latest/"
+
+      - name: Purge latest/ from the CDN
+        env:
+          CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          files=$(aws s3 ls --endpoint-url "$S3_ENDPOINT" "s3://$BUCKET/latest/" | awk '{print $4}')
+          # Purge both the public URL and the origin URL the images-router
+          # Worker actually caches (its subrequest to Infomaniak).
+          origin="https://s3.gva2.infomaniak.cloud/c0862b7f7b6849508bbcd74fb00e7fe2:$BUCKET/latest"
+          urls=$(for f in $files ""; do
+            printf '"https://images.openimages.cloud/%s/latest/%s",' "$BUCKET" "$f"
+            printf '"%s/%s",' "$origin" "${f:-index.html}"
+          done)
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+            --data "{\"files\":[${urls%,}]}" | grep -q '"success":true'
+          echo "latest/ now serves $VERSION"

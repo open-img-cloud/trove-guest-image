@@ -1,0 +1,76 @@
+#!/bin/bash
+# Runs after the upstream post-install hooks (13-trove-guest-sudoers,
+# 31-enable-guest-agent-systemd) and before 99-clean-apt.
+
+if [ "${DIB_DEBUG_TRACE:-0}" -gt 0 ]; then
+    set -x
+fi
+set -eu
+set -o pipefail
+
+GUEST_USERNAME=${GUEST_USERNAME:-"ubuntu"}
+DOCKER_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"   # Docker Release (CE deb)
+
+# --- Docker CE: pinned versions actually installed ------------------------
+# An apt pin on a version that no longer exists silently falls back to the
+# newest one: check what dpkg has.
+check_version() {
+    local pkg=$1 want=$2 have
+    have=$(dpkg-query -W -f='${Version}' "$pkg" 2>/dev/null || true)
+    if [ "$have" != "$want" ]; then
+        echo "ERROR: $pkg is '${have:-not installed}', expected '$want'"
+        exit 1
+    fi
+    echo "$pkg $have"
+}
+check_version docker-ce "${DIB_OIC_DOCKER_VERSION:?}"
+check_version docker-ce-cli "${DIB_OIC_DOCKER_VERSION}"
+check_version containerd.io "${DIB_OIC_CONTAINERD_VERSION:?}"
+if dpkg-query -W docker-ce-rootless-extras >/dev/null 2>&1; then
+    check_version docker-ce-rootless-extras "${DIB_OIC_DOCKER_VERSION}"
+fi
+# 21-docker fetched the repository key over HTTPS without checking it.
+if ! apt-key finger 2>/dev/null | tr -d ' ' | grep -q "$DOCKER_FPR"; then
+    echo "ERROR: Docker apt key $DOCKER_FPR not found in the apt keyring"
+    exit 1
+fi
+# Build-time pin only: running guests follow the Docker repository like
+# upstream images do.
+rm -f /etc/apt/preferences.d/90-oic-docker-pin
+
+# --- Key-only access --------------------------------------------------------
+# ubuntu-guest/install.d/11-user sets the password "<user>" for the guest
+# user. Replace it (and root's) by a locked, empty hash: login only with the
+# SSH key cloud-init installs from the Nova key pair (trove.conf nova_keypair).
+for u in "$GUEST_USERNAME" root; do
+    if id -u "$u" >/dev/null 2>&1; then
+        usermod -p '!' "$u"
+    fi
+done
+for u in "$GUEST_USERNAME" root; do
+    hash=$(getent shadow "$u" | cut -d: -f2)
+    case "$hash" in
+        '!'|'*'|'!*') ;;
+        *) echo "ERROR: $u still has a usable password hash"; exit 1 ;;
+    esac
+done
+
+# sshd reads sshd_config.d/*.conf first and keeps the first value it sees:
+# a low number wins over cloud-init's 50-cloud-init.conf.
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/05-oic-key-only.conf <<CONF
+# openimages.cloud: SSH key authentication only.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin prohibit-password
+CONF
+chmod 0644 /etc/ssh/sshd_config.d/05-oic-key-only.conf
+
+# cloud-init: never turn password authentication back on (Ubuntu's own
+# cloud.cfg already creates the default user with lock_passwd: true).
+mkdir -p /etc/cloud/cloud.cfg.d
+cat > /etc/cloud/cloud.cfg.d/95-oic-key-only.cfg <<CONF
+# openimages.cloud: SSH key authentication only.
+ssh_pwauth: false
+CONF
+chmod 0644 /etc/cloud/cloud.cfg.d/95-oic-key-only.cfg

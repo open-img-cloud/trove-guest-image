@@ -1,0 +1,25 @@
+#!/bin/bash
+# Pin Docker CE before ubuntu-docker's 21-docker installs it (install.d
+# scripts of all elements run in name order). The pin is removed again by
+# post-install.d/90-oic-key-only once the versions have been checked.
+
+if [ "${DIB_DEBUG_TRACE:-0}" -gt 0 ]; then
+    set -x
+fi
+set -eu
+set -o pipefail
+
+: "${DIB_OIC_DOCKER_VERSION:?must be set by build/dib-build.sh}"
+: "${DIB_OIC_CONTAINERD_VERSION:?must be set by build/dib-build.sh}"
+
+mkdir -p /etc/apt/preferences.d
+cat > /etc/apt/preferences.d/90-oic-docker-pin <<PIN
+Package: docker-ce docker-ce-cli docker-ce-rootless-extras
+Pin: version ${DIB_OIC_DOCKER_VERSION}
+Pin-Priority: 1001
+
+Package: containerd.io
+Pin: version ${DIB_OIC_CONTAINERD_VERSION}
+Pin-Priority: 1001
+PIN
+echo "Pinned docker-ce ${DIB_OIC_DOCKER_VERSION}, containerd.io ${DIB_OIC_CONTAINERD_VERSION}"

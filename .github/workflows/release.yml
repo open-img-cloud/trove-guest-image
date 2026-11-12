@@ -1,0 +1,86 @@
+name: Build & publish image
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'OpenStack series, e.g. 2026.2. Empty = VERSION file.'
+        required: false
+      publish:
+        description: 'If false, skip upload + CF purge (PR / dry-run validation)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write   # cosign keyless via GitHub OIDC
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      is_latest: ${{ steps.v.outputs.is_latest }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - id: v
+        shell: bash
+        env:
+          IN_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${IN_VERSION:-}" ]]; then
+            v="$IN_VERSION"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          elif [[ -f VERSION ]]; then
+            v=$(tr -d '[:space:]' < VERSION)
+          else
+            echo "::error::no version provided and no VERSION file found"
+            exit 1
+          fi
+          if [[ ! "$v" =~ ^[0-9]{4}\.[0-9]+$ ]]; then
+            echo "::error::version '$v' is not OpenStack-series form (expected YYYY.N, e.g. 2026.2)"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved: version=$v"
+          # latest/ only follows the newest series: republishing an older one
+          # must not move the alias.
+          current=$(tr -d '[:space:]' < VERSION)
+          newest=$(printf '%s\n%s\n' "$v" "$current" | sort -V | tail -n1)
+          if [[ "$newest" == "$v" ]]; then is_latest=true; else is_latest=false; fi
+          echo "is_latest=$is_latest" >> "$GITHUB_OUTPUT"
+          echo "latest/ alias update: $is_latest (VERSION=$current)"
+
+  build:
+    needs: resolve-version
+    name: Build
+    uses: open-img-cloud/.github/.github/workflows/build-dib-image.yml@main
+    with:
+      os_name: trove-guest-image
+      version: ${{ needs.resolve-version.outputs.version }}
+      output_filename: 'trove-guest-image-{version}-amd64.qcow2'
+      build_script: build/dib-build.sh
+      # GH-hosted runner: DIB needs full root capabilities in the build
+      # container (debootstrap, mknod, loop mounts). Rootless Podman on our
+      # self-hosted runners strips them (same reason as octavia-amphora and
+      # manila-service-image).
+      runner_labels: '["ubuntu-latest"]'
+      # ubuntu:24.04 for debootstrap + apt. Not cosign-signed by us, hence
+      # verify_builder: false (documented deviation, IMAGE_STANDARDS A).
+      build_container: 'ubuntu:24.04'
+      verify_builder: false
+      publish: ${{ inputs.publish == true || github.event_name == 'push' }}
+      sync_latest: ${{ needs.resolve-version.outputs.is_latest == 'true' }}
+      # No runtime_smoke_login_user yet: the image is cloud-init based (user
+      # `ubuntu`, key from the Nova key pair) and may pass the shared smoke,
+      # but outside Trove its guest agent restarts in a loop for lack of the
+      # files Trove injects (guest_info.conf, trove-guestagent.conf), and its
+      # network stack (ifupdown and isc-dhcp-client come with the guest-agent
+      # element) is untested against the strict IPv6 contract. Validate a
+      # first build by hand before setting `ubuntu` here. See README, "Testing".
+    secrets: inherit

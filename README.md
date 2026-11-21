@@ -39,8 +39,8 @@ control plane component**: Trove boots it, tenants never do.
 
 | OpenStack series | Codename | Trove branch | Status here |
 |---|---|---|---|
-| 2025.2 | Flamingo | stable/2025.2 | buildable |
-| 2026.1 | Gazpacho | stable/2026.1 | buildable |
+| 2025.2 | Flamingo | stable/2025.2 | published |
+| 2026.1 | Gazpacho | stable/2026.1 | published |
 | 2026.2 | Hibiscus | stable/2026.2 | published, `latest/` |
 
 The series selects the pinned Trove commit, hence the guest agent version: the guest agent must

@@ -59,7 +59,7 @@ jobs:
   build:
     needs: resolve-version
     name: Build
-    uses: open-img-cloud/.github/.github/workflows/build-dib-image.yml@dib-mirror-timeout
+    uses: open-img-cloud/.github/.github/workflows/build-dib-image.yml@main
     with:
       os_name: trove-guest-image
       version: ${{ needs.resolve-version.outputs.version }}

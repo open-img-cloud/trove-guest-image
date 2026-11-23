@@ -76,6 +76,11 @@ jobs:
       verify_builder: false
       publish: ${{ inputs.publish == true || github.event_name == 'push' }}
       sync_latest: ${{ needs.resolve-version.outputs.is_latest == 'true' }}
+      # Azure Ubuntu mirror, next to the GitHub-hosted runners: archive.ubuntu.com
+      # served small packages in tens of seconds on 2026-11-23. A healthy build
+      # takes under 10 minutes: a stuck fetch fails after 30.
+      dib_distribution_mirror: http://azure.archive.ubuntu.com/ubuntu
+      build_timeout_minutes: 30
       # No runtime_smoke_login_user yet: the image is cloud-init based (user
       # `ubuntu`, key from the Nova key pair) and may pass the shared smoke,
       # but outside Trove its guest agent restarts in a loop for lack of the
